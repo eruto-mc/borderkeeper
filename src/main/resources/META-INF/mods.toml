@@ -1,0 +1,42 @@
+modLoader="javafml"
+loaderVersion="[47,)"
+license="MIT"
+issueTrackerURL="https://github.com/eruto-mc/borderkeeper/issues"
+
+[[mods]]
+modId="borderkeeper"
+# ⚠ ここに数字を書かない。jar のマニフェストの Implementation-Version を読む
+#    （build.gradle が project.version から入れている）。版の正を2か所に置くと必ず片方が腐る。
+version="${file.jarVersion}"
+displayName="Border Keeper"
+description='''
+ワールドボーダーを、Chunky が実際に焼き終わった範囲に追随させる。
+
+「生成済みの場所にしか行けない」を保つための道具。プレイヤーが未生成の土地へ出ると
+そこで生成が走ってサーバが固まるので、ボーダーを焼けた範囲の内側に置いておく。
+
+Chunky の進捗を API から直接受け取り、半径を出してボーダーへ反映する。
+ワールドの容量が予算を超えたら事前生成を止める。
+'''
+
+[[dependencies.borderkeeper]]
+    modId="forge"
+    mandatory=true
+    versionRange="[47,)"
+    ordering="NONE"
+    side="SERVER"
+
+[[dependencies.borderkeeper]]
+    modId="minecraft"
+    mandatory=true
+    versionRange="[1.20.1,1.20.2)"
+    ordering="NONE"
+    side="SERVER"
+
+# ⚠ Chunky が無いと何もできない（進捗を受け取る相手が居ない）。必須にする。
+[[dependencies.borderkeeper]]
+    modId="chunky"
+    mandatory=true
+    versionRange="[1.3,2)"
+    ordering="AFTER"
+    side="SERVER"
