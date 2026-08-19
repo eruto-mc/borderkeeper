@@ -50,9 +50,41 @@ public final class BorderKeeperEvents {
     private static volatile boolean paused = false;
     private static volatile MinecraftServer server;
 
+    /**
+     * ⚠⚠ <b>事前生成専用のワールドでは何もしない</b>（2026-08-19 に踏んだ）。
+     *
+     * <p>この mod は「焼けた範囲より内側にボーダーを置く」ことで、部員が未生成の地形へ
+     * 出られないようにする。<b>遊ぶ世界では正しい</b>。
+     *
+     * <p>⚠ 事前生成だけを目的としたサーバでは、それが<b>生成の邪魔になる</b>。実測:
+     * 半径1000の焼きで、Chunky が 3617 チャンク（＝半径 481 ブロック相当）まで進んだ
+     * 時点で最初の更新が走り、ボーダーが <b>59999968 → 594</b>（半径 297 ブロック
+     * ＝18.6 チャンク）へ縮んだ。すでに焼けている範囲より内側である。
+     * その瞬間に生成中だった輪が失われ、<b>原点から 14〜19 チャンクの帯 715 個</b>が
+     * 世界から欠けた（22,201 のはずが 21,486）。
+     * 欠けた場所に村が1つあり、<b>「川の水が消えた」ように見えて実際は地形が無かった</b>。
+     *
+     * <p>それまでの焼きで出なかったのは競合だったから。起動が遅く機械を分け合った回だけ、
+     * Chunky が先に進みすぎて露見した。⚠ <b>時々しか出ない不具合は、出ないほうが危ない。</b>
+     *
+     * <p>判定は世界の名前で行う。{@code burn_seed_worlds.py} は必ず {@code burn-} で
+     * 始まる level-name を作るので、これで事前生成専用だと分かる。
+     */
+    private static boolean isPregenOnlyWorld(MinecraftServer s) {
+        String name = s.getWorldData().getLevelName();
+        return name != null && name.startsWith("burn-");
+    }
+
     @SubscribeEvent
     public static void onServerStarted(ServerStartedEvent event) {
         server = event.getServer();
+        if (isPregenOnlyWorld(event.getServer())) {
+            BorderKeeper.LOGGER.info("Border Keeper: 事前生成専用のワールド（{}）なので"
+                            + "ボーダーには触らない",
+                    event.getServer().getWorldData().getLevelName());
+            server = null;
+            return;
+        }
         ChunkyAPI a = api();
         if (a == null) {
             // ⚠ 黙って何もしないのが一番危ない。理由を1行出す
