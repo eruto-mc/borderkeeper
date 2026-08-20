@@ -80,6 +80,34 @@ public final class BorderPlan {
         return (int) (Math.max(MIN_RADIUS, safe) * 2.0);
     }
 
+    /**
+     * 申告された半径を、<b>実際に生成されている土地</b>で上から抑える（2026-08-21 追加）。
+     *
+     * <p>⚠⚠ <b>Chunky の進捗は、この世界のものとは限らない.</b> 進捗はワールドの外
+     * （{@code config/chunky/tasks/}）に在るので、ワールドを差し替えても残る。
+     * 2026-08-20 に、遊び用サーバのワールドを別のものへ差し替えたあと、
+     * <b>前の世界の進捗（45,727 チャンク）</b>を根拠にボーダーが 2866 まで開いた。
+     * その世界に実在したのは 27,026 チャンクで、<b>全部そろっていたのは ±1,184</b> だった。
+     *
+     * <p>踏み込んだ人は、チャンク生成に伴う山岳河川の計算で
+     * <b>サーバスレッドが 217 秒止まる</b>のを見る（症状は「入れるのに地形が来ない」で、
+     * ⚠ <b>ログには何も出ない</b>）。
+     *
+     * <p>⚠ <b>測れなかったときは抑えない.</b>「測れなかった」と「焼けていない」は別物で、
+     * {@link #nextDiameter} の「根拠ゼロで縮めない」と同じ考え方。
+     *
+     * @param allowedRadius   焼けたチャンク数から出した半径
+     * @param generatedRadius 実測した「全部そろう半径」（ブロック）。0 以下なら測れなかった
+     * @param marginBlocks    {@link #margin}
+     */
+    public static double clampToGenerated(double allowedRadius, double generatedRadius,
+                                          int marginBlocks) {
+        if (generatedRadius <= 0.0) {
+            return allowedRadius;
+        }
+        return Math.min(allowedRadius, Math.max(0.0, generatedRadius - marginBlocks));
+    }
+
     /** ネザーのボーダー直径。⚠ <b>常にオーバーワールド ÷ 8 ちょうど.</b> */
     public static int netherDiameter(int overworldDiameter) {
         return Math.max(2, overworldDiameter / 8);

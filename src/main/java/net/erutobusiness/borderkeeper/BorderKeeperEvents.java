@@ -120,8 +120,17 @@ public final class BorderKeeperEvents {
         }
         int margin = BorderPlan.margin(s.getPlayerList().getViewDistance());
 
-        double owAllowed = allowed(OVERWORLD, margin);
-        double netherAllowed = allowed(NETHER, margin);
+        // ⚠⚠ **Chunky の申告を、実際に生成されている土地で上から抑える**（2026-08-21 追加）。
+        //    ⚠ 進捗はワールドの外（config/chunky/tasks/）に在るので、**ワールドを差し替えても残る**。
+        //    2026-08-20 に前の世界の 45,727 チャンクを根拠にボーダーが 2866 まで開き、
+        //    実在は 27,026 チャンク・全部そろう半径は ±1,184 だった。
+        //    踏み込んだ人は山岳河川の計算で **217 秒**固まる（ログには何も出ない）。
+        ServerLevel netherLevel = s.getLevel(Level.NETHER);
+        double owGenerated = generatedRadius(overworld);
+        double owAllowed = BorderPlan.clampToGenerated(allowed(OVERWORLD, margin),
+                owGenerated, margin);
+        double netherAllowed = BorderPlan.clampToGenerated(allowed(NETHER, margin),
+                generatedRadius(netherLevel), margin);
         // ⚠ ネザーをまだ1チャンクも焼いていない段階では、そちらに引きずられて 0 になる。
         //    その場合はオーバーワールドだけで決める（ネザーは後から追いつく）。
         int want = (burned(NETHER) > 0)
@@ -136,18 +145,44 @@ public final class BorderKeeperEvents {
         Integer next = BorderPlan.nextDiameter(before, want, evidence);
         if (next != null) {
             border.setSize(next);
-            ServerLevel nether = s.getLevel(Level.NETHER);
-            if (nether != null) {
+            if (netherLevel != null) {
                 // ⚠ **ネザーは常に 1/8 ちょうど**。これでポータルの行き先がどちら向きにも丸められない。
                 //    次元ごとに独立したボーダーを持てるのは World Border Fixer が入っているため。
-                nether.getWorldBorder().setSize(BorderPlan.netherDiameter(next));
+                netherLevel.getWorldBorder().setSize(BorderPlan.netherDiameter(next));
             }
+            // ⚠ **実測した半径も一緒に出す。** どちらが効いたのか（申告か実測か）が
+            //    後から読めないと、「なぜこの値になったのか」を調べ直す羽目になる。
             BorderKeeper.LOGGER.info(
-                    "Border Keeper: ボーダー {} → {}（オーバーワールド {} チャンク{}・余白 {}）",
+                    "Border Keeper: ボーダー {} → {}（オーバーワールド {} チャンク{}・余白 {}・"
+                            + "実測の全部そろう半径 {}）",
                     before, next, burned(OVERWORLD),
-                    Boolean.TRUE.equals(DONE.get(OVERWORLD.toString())) ? "・完走" : "", margin);
+                    Boolean.TRUE.equals(DONE.get(OVERWORLD.toString())) ? "・完走" : "", margin,
+                    owGenerated > 0 ? (long) owGenerated : "測れず");
         }
         checkBudget(s);
+    }
+
+    /**
+     * その次元で「原点まわりに全部そろっている半径」（ブロック）。⚠ 測れなければ 0。
+     *
+     * <p>⚠ <b>ここは場所を教えるだけ</b>で、数えるのは {@link GeneratedExtent}
+     * （Minecraft を知らないので、サーバを起動せずに確かめられる）。
+     */
+    private static double generatedRadius(ServerLevel level) {
+        if (level == null) {
+            return 0.0;
+        }
+        try {
+            Path dim = net.minecraft.world.level.dimension.DimensionType.getStorageFolder(
+                    level.dimension(),
+                    level.getServer().getWorldPath(
+                            net.minecraft.world.level.storage.LevelResource.ROOT));
+            return GeneratedExtent.radiusBlocks(dim.resolve("region"));
+        } catch (RuntimeException e) {
+            // ⚠ **測れないことで落とさない。** 抑えないだけで、ボーダーの追随自体は続ける
+            BorderKeeper.LOGGER.warn("Border Keeper: 生成済みの範囲を測れなかった: {}", e.toString());
+            return 0.0;
+        }
     }
 
     /**
