@@ -96,16 +96,34 @@ public final class BorderPlan {
      * <p>⚠ <b>測れなかったときは抑えない.</b>「測れなかった」と「焼けていない」は別物で、
      * {@link #nextDiameter} の「根拠ゼロで縮めない」と同じ考え方。
      *
-     * @param allowedRadius   焼けたチャンク数から出した半径
+     * <p>⚠⚠ <b>2026-08-26: 天井だけでなく<u>床</u>にもした。</b>
+     * それまでは {@code Math.min} で<b>上から抑えるだけ</b>だったので、
+     * <b>焼けたチャンク数が小さいと、実際に土地が在ってもボーダーが縮んだ</b>。
+     *
+     * <p>実際に踏んだ形（本番のレンタルサーバ）: Chunky のタスクを入れ直すと
+     * <b>進捗が 0 から数え直しになる</b>。ディスクには 4,176 ブロックぶんの土地が在るのに
+     * 申告は 8,548 チャンク（=510 ブロック）で、⚠ <b>ボーダーが 7,632 → 256 に縮んだ</b>。
+     *
+     * <p>⚠⚠ <b>直し方の考え方は1本:「ディスクで実測できたなら、それが正」。</b>
+     * 進捗カウンタは<b>そのタスクがどこまで進んだか</b>であって、
+     * <b>この世界にどれだけ土地が在るか</b>ではない。後者は {@link GeneratedExtent} が
+     * region ファイルの見出しから直に測っており、<b>そちらが唯一の一次情報</b>。
+     * これで過去2件が同じ規則で受け止まる:
+     * <ul>
+     *   <li>2026-08-21（前の世界の進捗で<b>開きすぎ</b>）… 実測が<b>天井</b>として効く → 縮む</li>
+     *   <li>2026-08-26（進捗が 0 に戻って<b>縮みすぎ</b>）… 実測が<b>床</b>として効く → 縮まない</li>
+     * </ul>
+     *
+     * @param allowedRadius   焼けたチャンク数から出した半径（⚠ <b>実測できたら使わない</b>）
      * @param generatedRadius 実測した「全部そろう半径」（ブロック）。0 以下なら測れなかった
      * @param marginBlocks    {@link #margin}
      */
     public static double clampToGenerated(double allowedRadius, double generatedRadius,
                                           int marginBlocks) {
         if (generatedRadius <= 0.0) {
-            return allowedRadius;
+            return allowedRadius;              // ⚠ 測れない＝抑えも支えもしない
         }
-        return Math.min(allowedRadius, Math.max(0.0, generatedRadius - marginBlocks));
+        return Math.max(0.0, generatedRadius - marginBlocks);
     }
 
     /** ネザーのボーダー直径。⚠ <b>常にオーバーワールド ÷ 8 ちょうど.</b> */

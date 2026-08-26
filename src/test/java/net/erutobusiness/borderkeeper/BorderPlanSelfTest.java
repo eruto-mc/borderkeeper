@@ -77,6 +77,45 @@ public final class BorderPlanSelfTest {
                 + BorderPlan.MIN_RADIUS + " まで落ちる");
         System.out.println();
 
+        // ── ここから「直したあとに満たすべきこと」──────────────────────────
+        //
+        // ⚠⚠ **規則を1本にする**（2026-08-26）:
+        //     「ディスクで実測できたなら、それが正。天井にも床にもする。」
+        //   これで過去2件の事故が**両方**受け止められる:
+        //     2026-08-21（開きすぎ）… 実測が**天井**として効く → 縮む（正しい）
+        //     2026-08-26（進捗が0に）… 実測が**床**として効く → 縮まない（正しい）
+        System.out.println("== 直したあとに満たすこと: 実測できたら実測が正 ==");
+        // 進捗は小さい（8548 チャンク → 510）が、ディスクには 4176 ブロックぶん在る
+        double twoSided = BorderPlan.clampToGenerated(510.0, 4176.0, MARGIN);
+        check("進捗が小さくても、実測（4176）まで下げない＝床として効く",
+              Math.abs(twoSided - (4176.0 - MARGIN)) < 1.0,
+              "得た値 " + twoSided + "（期待 " + (4176.0 - MARGIN) + "）");
+        // 進捗が大きすぎても、実測で抑える（2026-08-21 と同じ形）
+        double stillCapped = BorderPlan.clampToGenerated(9999.0, 1184.0, MARGIN);
+        check("進捗が大きすぎても、実測（1184）で抑える＝天井として効く",
+              Math.abs(stillCapped - (1184.0 - MARGIN)) < 1.0,
+              "得た値 " + stillCapped);
+        System.out.println();
+
+        // ⚠⚠ **ネザーが縛る**（2026-08-26 に実物で確かめた）。
+        //   ネザーは region が4個しか無く、実測は約 496 ブロック。
+        //   規則「全次元の最小」により、オーバーワールドのボーダーもそこに縛られる。
+        //   ⚠ **これは不具合ではなく設計どおり**——ポータルの行き先が丸められないための規則。
+        //   ⚠ だから **ネザーを事前生成しない限り 7,632 は戻らない**。ここを試験で固定しておく。
+        System.out.println("== ネザーが縛ることを固定する（設計どおり・不具合ではない） ==");
+        double owMeasured = BorderPlan.clampToGenerated(510.0, 4176.0, MARGIN);
+        double netherMeasured = BorderPlan.clampToGenerated(0.0, 496.0, MARGIN);
+        int withNether = BorderPlan.overworldDiameter(owMeasured, netherMeasured);
+        check("ネザー 496 ブロックだと、オーバーワールドは直径 4,864 前後までしか許されない",
+              Math.abs(withNether - 4864) <= 32, "得た値 " + withNether);
+        // ネザーを 669 ブロック（＝ 3816/8 + 余白）まで焼けば、7,632 が許される
+        double netherEnough = BorderPlan.clampToGenerated(0.0, 669.0, MARGIN);
+        int withEnoughNether = BorderPlan.overworldDiameter(owMeasured, netherEnough);
+        check("ネザーを 669 ブロックまで焼けば 7,632 以上が許される",
+              withEnoughNether >= 7632, "得た値 " + withEnoughNether);
+        System.out.println("     ⚠ ネザー 669 ブロック ＝ 42 チャンク半径 ＝ 約 7,200 チャンク（短時間で焼ける）");
+        System.out.println();
+
         // ── 陰性対照1: 2026-08-21 の事故（開きすぎ）が再発しないこと ──────────
         //
         // 前の世界の進捗 45,727 チャンクが残ったまま、実在は「全部そろう半径 ±1,184」だった。
