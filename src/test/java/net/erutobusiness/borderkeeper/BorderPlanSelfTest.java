@@ -116,6 +116,35 @@ public final class BorderPlanSelfTest {
         System.out.println("     ⚠ ネザー 669 ブロック ＝ 42 チャンク半径 ＝ 約 7,200 チャンク（短時間で焼ける）");
         System.out.println();
 
+        // ⚠⚠ **人が居る間はネザーに縛らせない**（2026-08-26 追加）。
+        //
+        // ⚠ **なぜ要るか**: 無人時に両次元を並行で焼くと、ネザーが追いつくまでの数分間、
+        //   全次元の最小の規則でボーダーが小さくなる。⚠ **無人ならそれでよい。**
+        //   ところが**その最中に部員が入ってくると Chunky Autopause が事前生成を止める**ので、
+        //   ⚠⚠ **ボーダーが小さいまま固定される**。2026-08-26 に実際に 512 で固定され、
+        //   部員1人が自分の居場所ごとボーダーの外になった。
+        //
+        // ⚠ **人が居る間はオーバーワールドだけで決める**——オーバーワールドの土地は
+        //   実測で「全部そろっている」ことが分かっているので、そこまで開くのは安全。
+        //   ネザーは自分のボーダー（÷8）が狭いままになるだけで、誰も締め出さない。
+        System.out.println("== 人が居る間はネザーに縛らせない ==");
+        double owOk = 3984.0;        // オーバーワールドの実測から（4176 - 192）
+        double netherBehind = 32.0;  // ネザーは追いついていない（実測 224 - 192）
+        check("無人なら、ネザーに縛られて小さくなる（設計どおり）",
+              BorderPlan.overworldDiameter(owOk, netherBehind, false) == 512,
+              "得た値 " + BorderPlan.overworldDiameter(owOk, netherBehind, false));
+        check("⚠ 人が居るなら、オーバーワールドだけで決める（縮まない）",
+              BorderPlan.overworldDiameter(owOk, netherBehind, true) == 7968,
+              "得た値 " + BorderPlan.overworldDiameter(owOk, netherBehind, true));
+        check("人が居ても、オーバーワールドの実測が小さければ小さくなる（＝止めすぎない）",
+              BorderPlan.overworldDiameter(500.0, 999.0, true) == 1000,
+              "得た値 " + BorderPlan.overworldDiameter(500.0, 999.0, true));
+        check("引数2つの古い形は「無人」と同じ（既存の呼び出しを壊さない）",
+              BorderPlan.overworldDiameter(owOk, netherBehind)
+                      == BorderPlan.overworldDiameter(owOk, netherBehind, false),
+              "食い違った");
+        System.out.println();
+
         // ── 陰性対照1: 2026-08-21 の事故（開きすぎ）が再発しないこと ──────────
         //
         // 前の世界の進捗 45,727 チャンクが残ったまま、実在は「全部そろう半径 ±1,184」だった。

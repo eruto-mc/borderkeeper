@@ -76,7 +76,34 @@ public final class BorderPlan {
      * @param netherAllowed    ネザーで許せる半径（⚠ ×8 して比べる）
      */
     public static int overworldDiameter(double overworldAllowed, double netherAllowed) {
-        double safe = Math.min(overworldAllowed, netherAllowed * 8.0);
+        return overworldDiameter(overworldAllowed, netherAllowed, false);
+    }
+
+    /**
+     * 同上。⚠ <b>人が居る間はネザーに縛らせない</b>（2026-08-26 追加）。
+     *
+     * <p>⚠⚠ <b>なぜ要るか</b>: 無人時に両次元を並行で焼くと、<b>ネザーが追いつくまでの数分間</b>、
+     * 上の「全次元の最小」の規則でボーダーが小さくなる。⚠ <b>無人ならそれでよい</b>——
+     * 誰も締め出さないし、追いつけば戻る。
+     *
+     * <p>⚠ ところが<b>その最中に部員が入ってくると Chunky Autopause が事前生成を止める</b>ので、
+     * 進捗イベントが来なくなり、⚠⚠ <b>ボーダーが小さいまま固定される</b>。
+     * 2026-08-26 に実際に <b>512 で固定</b>され、部員1人が自分の居場所ごとボーダーの外になった。
+     *
+     * <p>⚠ <b>人が居る間はオーバーワールドだけで決める。</b> オーバーワールドの土地は
+     * {@link GeneratedExtent} が「全部そろっている」と実測しているので、そこまで開くのは安全。
+     * ネザーは自分のボーダー（÷8）が狭いままになるだけで、<b>誰も締め出さない</b>。
+     *
+     * <p>⚠ <b>「縮めない」ではない.</b> オーバーワールドの実測そのものが小さければ、
+     * 人が居ても縮む（2026-08-21 の「開きすぎ」を直す道を塞がないため）。
+     *
+     * @param playersOnline 1人でも居るか
+     */
+    public static int overworldDiameter(double overworldAllowed, double netherAllowed,
+                                        boolean playersOnline) {
+        double safe = playersOnline
+                ? overworldAllowed
+                : Math.min(overworldAllowed, netherAllowed * 8.0);
         return (int) (Math.max(MIN_RADIUS, safe) * 2.0);
     }
 

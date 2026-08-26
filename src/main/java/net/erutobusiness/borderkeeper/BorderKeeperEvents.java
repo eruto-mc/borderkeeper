@@ -5,6 +5,7 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.border.WorldBorder;
+import net.minecraftforge.event.entity.player.PlayerEvent;
 import net.minecraftforge.event.server.ServerStartedEvent;
 import net.minecraftforge.event.server.ServerStoppingEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
@@ -103,6 +104,39 @@ public final class BorderKeeperEvents {
         DONE.clear();
     }
 
+    /**
+     * ⚠⚠ <b>部員が入ってきたら、その場でボーダーを計算し直す</b>（2026-08-26 追加）。
+     *
+     * <p>⚠ <b>なぜ要るか</b>: この mod は <b>Chunky の進捗イベントでしか動かない</b>。
+     * ところが Chunky Autopause は<b>人が入ると事前生成を止める</b>ので、
+     * ⚠⚠ <b>そこから進捗イベントが1つも来なくなる</b>。
+     *
+     * <p>つまり「無人のあいだにネザーが追いつくまで一時的に狭くなっていた」状態のまま
+     * 部員が入ってくると、⚠ <b>狭いボーダーがそのまま固定される</b>。
+     * 2026-08-26 に実際に <b>512 で固定</b>され、部員1人が自分の居場所ごとボーダーの外になった。
+     *
+     * <p>⚠ 入った瞬間に計算し直せば、{@link BorderPlan#overworldDiameter} の
+     * 「人が居る間はオーバーワールドだけで決める」が効いて<b>広い側へ戻る</b>。
+     *
+     * <p>⚠ <b>広げるだけの向きではない.</b> オーバーワールドの実測そのものが小さければ縮む
+     * （2026-08-21 の「開きすぎ」を直す道を塞がないため）。
+     *
+     * <p>⚠ <b>サーバスレッドへ渡す。</b> このイベント自体はサーバスレッドで来るが、
+     * <b>この時点で参加者が一覧に入っているとは限らない</b>ので、
+     * {@code execute} で次の tick へ回して<b>確実に数えられる状態</b>にしてから計算する。
+     */
+    @SubscribeEvent
+    public static void onPlayerJoin(PlayerEvent.PlayerLoggedInEvent event) {
+        MinecraftServer s = server;
+        if (s == null) {
+            return;
+        }
+        s.execute(() -> {
+            BorderKeeper.LOGGER.info("Border Keeper: 部員が入ったのでボーダーを計算し直す");
+            apply(s);
+        });
+    }
+
     /** ⚠ ワーカースレッドから呼ばれる。重い処理とボーダー操作をここでやらない。 */
     private static void onProgress(GenerationProgressEvent e) {
         BURNED.put(e.world(), e.chunks());
@@ -133,8 +167,17 @@ public final class BorderKeeperEvents {
                 generatedRadius(netherLevel), margin);
         // ⚠ ネザーをまだ1チャンクも焼いていない段階では、そちらに引きずられて 0 になる。
         //    その場合はオーバーワールドだけで決める（ネザーは後から追いつく）。
+        //
+        // ⚠⚠ **「焼き始めた瞬間」も同じ穴だった**（2026-08-26）。
+        //    上の `burned(NETHER) > 0` は **1チャンクでも焼けば外れる**ので、
+        //    両次元を並行で焼き始めた瞬間にネザーが縛り側へ回り、
+        //    ⚠ **ボーダーが 7,968 → 512 へ落ちた**。追いつけば戻るが、
+        //    ⚠⚠ **その最中に部員が入ると Autopause が事前生成を止めるので、小さいまま固定される**。
+        //    実際に 512 で固定され、部員1人が自分の居場所ごとボーダーの外になった。
+        //    → **人が居る間はオーバーワールドだけで決める**（{@link BorderPlan#overworldDiameter} の3引数版）。
+        boolean playersOnline = !s.getPlayerList().getPlayers().isEmpty();
         int want = (burned(NETHER) > 0)
-                ? BorderPlan.overworldDiameter(owAllowed, netherAllowed)
+                ? BorderPlan.overworldDiameter(owAllowed, netherAllowed, playersOnline)
                 : (int) (Math.max(BorderPlan.MIN_RADIUS, owAllowed) * 2.0);
 
         WorldBorder border = overworld.getWorldBorder();
