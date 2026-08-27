@@ -131,18 +131,60 @@ public final class BorderKeeperEvents {
         if (s == null) {
             return;
         }
-        s.execute(() -> {
-            BorderKeeper.LOGGER.info("Border Keeper: 部員が入ったのでボーダーを計算し直す");
-            apply(s);
+        // ⚠⚠ **本体スレッドでディスクを読まない**（2026-08-28 に本番で固めた）。
+        //    `apply()` は `GeneratedExtent.radiusBlocks()` を呼び、**region ファイルを全部読む**。
+        //    レンタルでは 574 本・7.9GB あり、⚠ **部員が入るたびに本体スレッドが数分止まった**
+        //    （`Timed out waiting for world statistics` が並び、⚠ **その部員自身が入れなくなる**）。
+        //    ⚠ 起きた並び:
+        //      01:55:47.151 joined the game
+        //      01:55:47.336 Border Keeper: 部員が入ったのでボーダーを計算し直す
+        //      01:56:19     Timed out waiting for world statistics（以後ずっと）
+        //
+        // ⚠ **測るのは別スレッド、ボーダーを触るのは本体スレッド**に分ける。
+        //    `GeneratedExtent` は 60 秒の控えを持つので、先に温めておけば
+        //    ⚠ **`apply()` の中の測定は控えに当たって一瞬で返る**。
+        net.minecraft.Util.backgroundExecutor().execute(() -> {
+            long t0 = System.nanoTime();
+            warmGeneratedExtent(s);
+            long ms = (System.nanoTime() - t0) / 1_000_000L;
+            s.execute(() -> {
+                BorderKeeper.LOGGER.info(
+                        "Border Keeper: 部員が入ったのでボーダーを計算し直す"
+                                + "（生成済みの測定は別スレッドで {} ms）", ms);
+                apply(s);
+            });
         });
     }
 
-    /** ⚠ ワーカースレッドから呼ばれる。重い処理とボーダー操作をここでやらない。 */
+    /**
+     * ⚠ <b>ディスクを読む所だけを別スレッドで先に済ませる</b>（2026-08-28 追加）。
+     *
+     * <p>⚠ ここでは**ボーダーを1つも触らない**。触るのは本体スレッドの {@link #apply}。
+     * ⚠ 失敗しても黙って戻る——測れなければ `apply()` 側が 0 として扱い、抑えないだけ。
+     */
+    private static void warmGeneratedExtent(MinecraftServer s) {
+        try {
+            generatedRadius(s.getLevel(Level.OVERWORLD));
+            generatedRadius(s.getLevel(Level.NETHER));
+        } catch (RuntimeException e) {
+            BorderKeeper.LOGGER.warn("Border Keeper: 生成済みの先読みに失敗した: {}", e.toString());
+        }
+    }
+
+    /**
+     * ⚠ ワーカースレッドから呼ばれる。ボーダー操作はここでやらない。
+     *
+     * <p>⚠⚠ <b>ディスクを読む所は、ここ（ワーカー）で済ませる</b>（2026-08-28 追加）。
+     * ⚠ 以前は `apply()` の中で本体スレッドが region を読んでおり、
+     * ⚠ **控えの 60 秒が切れた回だけ、本体スレッドが数百本の region を読んで止まっていた**。
+     * ⚠ ここで温めておけば、`apply()` の測定は控えに当たる。
+     */
     private static void onProgress(GenerationProgressEvent e) {
         BURNED.put(e.world(), e.chunks());
         DONE.put(e.world(), e.complete());
         MinecraftServer s = server;
         if (s != null) {
+            warmGeneratedExtent(s);
             s.execute(() -> apply(s));
         }
     }
@@ -261,24 +303,46 @@ public final class BorderKeeperEvents {
             return;
         }
         Path root = s.getWorldPath(net.minecraft.world.level.storage.LevelResource.ROOT);
-        double gb = folderGb(root);
-        if (gb < 0) {
-            return;                       // 測れなかった。⚠ 測れないことを理由に止めない
-        }
-        worldGb = gb;
-        if (gb >= BUDGET_GB && !paused) {
-            paused = true;
-            BorderKeeper.LOGGER.warn("Border Keeper: ワールドが {} GB に達した（予算 {} GB）"
-                    + " → 事前生成を止める", String.format("%.1f", gb), BUDGET_GB);
-            // ⚠ 止めるのは pause。cancel すると進捗が消えて、次に再開できない
-            ChunkyAPI a = api();
-            if (a != null) {
-                a.pauseTask(OVERWORLD.toString());
-                a.pauseTask(NETHER.toString());
-            } else {
-                BorderKeeper.LOGGER.warn("Border Keeper: 事前生成を止められなかった（API が無い）");
+        // ⚠⚠ **数えるのは別スレッド**（2026-08-28）。`folderGb` は**ワールドを丸ごと歩く**ので、
+        //    本体スレッドでやると tick が止まる。⚠ レンタル（7.9GB）で実際に止まった——
+        //    ⚠ **部員が入った直後に数分固まり、その部員が入れなくなった**
+        //    （`Timed out waiting for world statistics` が並ぶ）。
+        //    ⚠ 10 分に1回とはいえ、⚠ **当たった回に必ず止まる**ので回数の問題ではない。
+        //
+        // ⚠ **止める操作だけ本体スレッドへ戻す**（Chunky の API を別スレッドから叩かない）。
+        net.minecraft.Util.backgroundExecutor().execute(() -> {
+            long t0 = System.nanoTime();
+            double gb = folderGb(root);
+            long ms = (System.nanoTime() - t0) / 1_000_000L;
+            if (gb < 0) {
+                return;                   // 測れなかった。⚠ 測れないことを理由に止めない
             }
-        }
+            worldGb = gb;
+            if (gb < BUDGET_GB || paused) {
+                if (ms > 1000L) {
+                    BorderKeeper.LOGGER.info(
+                            "Border Keeper: 容量を数えた {} GB（別スレッドで {} ms）",
+                            String.format("%.1f", gb), ms);
+                }
+                return;
+            }
+            s.execute(() -> {
+                if (paused) {
+                    return;               // ⚠ 待っている間に誰かが止めていたら二重にやらない
+                }
+                paused = true;
+                BorderKeeper.LOGGER.warn("Border Keeper: ワールドが {} GB に達した（予算 {} GB）"
+                        + " → 事前生成を止める", String.format("%.1f", gb), BUDGET_GB);
+                // ⚠ 止めるのは pause。cancel すると進捗が消えて、次に再開できない
+                ChunkyAPI a = api();
+                if (a != null) {
+                    a.pauseTask(OVERWORLD.toString());
+                    a.pauseTask(NETHER.toString());
+                } else {
+                    BorderKeeper.LOGGER.warn("Border Keeper: 事前生成を止められなかった（API が無い）");
+                }
+            });
+        });
     }
 
     private static double folderGb(Path root) {
