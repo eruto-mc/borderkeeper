@@ -18,14 +18,18 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Stream;
 
 /**
  * Chunky の進捗を受け取り、ワールドボーダーを追随させる。
  *
- * <p>⚠ <b>進捗イベントはワーカースレッドから来る。</b> ボーダーの操作は
- * {@code server.execute(...)} でサーバスレッドへ渡す。
+ * <p>⚠⚠ <b>進捗イベントは本体スレッドから来る</b>（2026-10-01 に spark の記録の呼び出しの木で確かめた。
+ * Chunky の {@code GenerationTask.update} が {@code ServerChunkCache$MainThreadExecutor} の後始末の中で出す）。
+ * ⚠ 以前ここに「ワーカースレッドから来る」と書いてあり、その前提で region を数えていたので、
+ * <b>レンタルが焼いている間、ほぼ毎分 2 秒固まっていた</b>。数えるのは別スレッド、ボーダーの操作は
+ * {@code server.execute(...)} で本体スレッドへ渡す。
  */
 @Mod.EventBusSubscriber(modid = BorderKeeper.MODID)
 public final class BorderKeeperEvents {
@@ -171,22 +175,31 @@ public final class BorderKeeperEvents {
         }
     }
 
+    /** 進捗の側で数えている最中か。⚠ 数えている間に来た進捗は、数え終わりの {@code apply()} がまとめて拾う。 */
+    private static final AtomicBoolean WARMING = new AtomicBoolean(false);
+
     /**
-     * ⚠ ワーカースレッドから呼ばれる。ボーダー操作はここでやらない。
+     * ⚠⚠ <b>本体スレッドから呼ばれる</b>（2026-10-01 に確かめた。クラスの説明）。ここでは数えない。
      *
-     * <p>⚠⚠ <b>ディスクを読む所は、ここ（ワーカー）で済ませる</b>（2026-08-28 追加）。
-     * ⚠ 以前は `apply()` の中で本体スレッドが region を読んでおり、
-     * ⚠ **控えの 60 秒が切れた回だけ、本体スレッドが数百本の region を読んで止まっていた**。
-     * ⚠ ここで温めておけば、`apply()` の測定は控えに当たる。
+     * <p>⚠ region を数える所は別スレッドへ出し、数え終わってから本体スレッドで {@code apply()} を回す。
+     * ⚠ 1.5.2 は「ここはワーカー」と思い込み、この場で {@code warmGeneratedExtent} を呼んでいた
+     * （spark の記録で、20 分のうち 15 分で 1.8〜2.1 秒ずつ本体スレッドを止めていた）。
      */
     private static void onProgress(GenerationProgressEvent e) {
         BURNED.put(e.world(), e.chunks());
         DONE.put(e.world(), e.complete());
         MinecraftServer s = server;
-        if (s != null) {
-            warmGeneratedExtent(s);
-            s.execute(() -> apply(s));
+        if (s == null || !WARMING.compareAndSet(false, true)) {
+            return;
         }
+        net.minecraft.Util.backgroundExecutor().execute(() -> {
+            try {
+                warmGeneratedExtent(s);
+            } finally {
+                WARMING.set(false);
+            }
+            s.execute(() -> apply(s));
+        });
     }
 
     private static void apply(MinecraftServer s) {
@@ -202,11 +215,12 @@ public final class BorderKeeperEvents {
         //    実在は 27,026 チャンク・全部そろう半径は ±1,184 だった。
         //    踏み込んだ人は山岳河川の計算で **217 秒**固まる（ログには何も出ない）。
         ServerLevel netherLevel = s.getLevel(Level.NETHER);
-        double owGenerated = generatedRadius(overworld);
+        // ⚠ 本体スレッドでは数えない。控え（呼ぶ前に別スレッドで温めてある）を読むだけ（2026-10-01）
+        double owGenerated = cachedRadius(overworld);
         double owAllowed = BorderPlan.clampToGenerated(allowed(OVERWORLD, margin),
                 owGenerated, margin);
         double netherAllowed = BorderPlan.clampToGenerated(allowed(NETHER, margin),
-                generatedRadius(netherLevel), margin);
+                cachedRadius(netherLevel), margin);
         // ⚠ ネザーをまだ1チャンクも焼いていない段階では、そちらに引きずられて 0 になる。
         //    その場合はオーバーワールドだけで決める（ネザーは後から追いつく）。
         //
@@ -258,16 +272,31 @@ public final class BorderKeeperEvents {
             return 0.0;
         }
         try {
-            Path dim = net.minecraft.world.level.dimension.DimensionType.getStorageFolder(
-                    level.dimension(),
-                    level.getServer().getWorldPath(
-                            net.minecraft.world.level.storage.LevelResource.ROOT));
-            return GeneratedExtent.radiusBlocks(dim.resolve("region"));
+            return GeneratedExtent.radiusBlocks(regionDir(level));
         } catch (RuntimeException e) {
             // ⚠ **測れないことで落とさない。** 抑えないだけで、ボーダーの追随自体は続ける
             BorderKeeper.LOGGER.warn("Border Keeper: 生成済みの範囲を測れなかった: {}", e.toString());
             return 0.0;
         }
+    }
+
+    /** 控えにある半径だけを読む（数えない・錠を取らない）。⚠ 本体スレッドの {@link #apply} 用（2026-10-01）。 */
+    private static double cachedRadius(ServerLevel level) {
+        if (level == null) {
+            return 0.0;
+        }
+        try {
+            return GeneratedExtent.cachedBlocks(regionDir(level));
+        } catch (RuntimeException e) {
+            return 0.0;
+        }
+    }
+
+    private static Path regionDir(ServerLevel level) {
+        Path dim = net.minecraft.world.level.dimension.DimensionType.getStorageFolder(
+                level.dimension(),
+                level.getServer().getWorldPath(net.minecraft.world.level.storage.LevelResource.ROOT));
+        return dim.resolve("region");
     }
 
     /**

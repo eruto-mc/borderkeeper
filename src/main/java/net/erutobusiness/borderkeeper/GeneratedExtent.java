@@ -5,10 +5,10 @@ import java.io.InputStream;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.HashMap;
-import java.util.HashSet;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
-import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * region ファイルの見出しから「原点まわりで<b>全部そろっている</b>半径」を測る。
@@ -34,8 +34,8 @@ public final class GeneratedExtent {
      */
     private static final long CACHE_MS = 60_000L;
 
-    /** パス -> {測った時刻, 半径ブロック}。 */
-    private static final Map<String, double[]> CACHE = new HashMap<>();
+    /** パス -> {測った時刻, 半径ブロック}。⚠ 本体スレッドが {@link #cachedBlocks} で錠なしに読むので並行版。 */
+    private static final Map<String, double[]> CACHE = new ConcurrentHashMap<>();
 
     /** 見に行くリージョンの上限。⚠ 事故で巨大な木を舐め続けないための止め。 */
     private static final int MAX_RADIUS_REGIONS = 2000;
@@ -59,9 +59,29 @@ public final class GeneratedExtent {
         return r;
     }
 
-    /** ⚠ 試験から直接呼ぶ用（記録を挟まない）。 */
+    /**
+     * 控えに在る半径（ブロック）。⚠ <b>測らない・錠を取らない</b>（2026-10-01 追加）。控えが無ければ 0（＝抑えない）。
+     *
+     * <p>⚠ 本体スレッドの {@code apply()} はこちらを使う。{@link #radiusBlocks} は控えが切れていると
+     * region を全部読むうえ {@code synchronized} なので、別スレッドが数えている間は本体スレッドが錠で待たされる。
+     */
+    public static double cachedBlocks(Path regionDir) {
+        double[] hit = CACHE.get(regionDir.toString());
+        return hit == null ? 0.0 : hit[1];
+    }
+
+    /**
+     * ⚠ 試験から直接呼ぶ用（記録を挟まない）。
+     *
+     * <p>⚠⚠ <b>2026-10-01 に数え方を変えた</b>: それまではチャンクごとに {@code HashSet<Long>} へ入れていたが、
+     * 鍵 {@code ((long) x << 32) ^ z} の {@code hashCode()} は x ^ z になり、±850 チャンクの四角では
+     * 値が 2 千通りほどしか無い。⚠ <b>255 万件がほぼ同じ箱に落ち</b>、レンタルで 1 回 2 秒かかっていた
+     * （spark の記録で本体スレッドを 1.8〜2.1 秒止めていた。時間の半分以上が {@code HashMap$TreeNode}）。
+     * いまは region ごとの 1024 ビット（{@code long[16]}）を、region の座標の格子に並べて持つ。
+     */
     static double measure(Path regionDir) {
-        Set<Long> present = new HashSet<>();
+        List<int[]> coords = new ArrayList<>();
+        List<long[]> bits = new ArrayList<>();
         try (DirectoryStream<Path> ds = Files.newDirectoryStream(regionDir, "r.*.mca")) {
             for (Path p : ds) {
                 String[] parts = p.getFileName().toString().split("\\.");
@@ -84,6 +104,7 @@ public final class GeneratedExtent {
                 } catch (IOException e) {
                     continue;
                 }
+                long[] b = new long[16];
                 for (int j = 0; j < 1024; j++) {
                     int off = ((head[j * 4] & 0xFF) << 16)
                             | ((head[j * 4 + 1] & 0xFF) << 8)
@@ -91,41 +112,87 @@ public final class GeneratedExtent {
                     int len = head[j * 4 + 3] & 0xFF;
                     // ⚠ 長さ 0 の見出しは「場所は取ったが中身が無い」。数えない
                     if (off != 0 && len != 0) {
-                        present.add(key(rx * 32 + (j % 32), rz * 32 + (j / 32)));
+                        b[j >> 6] |= 1L << (j & 63);
                     }
                 }
+                coords.add(new int[]{rx, rz});
+                bits.add(b);
             }
         } catch (IOException | RuntimeException e) {
             return 0.0;                          // ⚠ 測れない＝抑えない
         }
-        if (!present.contains(key(0, 0))) {
+        Grid g = new Grid(coords, bits);
+        if (!g.has(0, 0)) {
             return 0.0;
         }
         // ⚠ **輪ごとに見る.** 毎回四角を全部見ると半径の3乗の手間になり、
         //    本番の広さ（半径 750 チャンク見込み）で現実的でなくなる。
         int r = 0;
-        while (r < MAX_RADIUS_REGIONS && ringComplete(present, r + 1)) {
+        while (r < MAX_RADIUS_REGIONS && ringComplete(g, r + 1)) {
             r++;
         }
         return r * 16.0;
     }
 
-    private static boolean ringComplete(Set<Long> present, int rr) {
+    /** region の座標の格子に、region ごとの 1024 ビットを並べたもの。 */
+    private static final class Grid {
+        private final int minX;
+        private final int minZ;
+        private final int w;
+        private final int h;
+        private final long[][] cells;
+
+        Grid(List<int[]> coords, List<long[]> bits) {
+            int x0 = Integer.MAX_VALUE, z0 = Integer.MAX_VALUE, x1 = Integer.MIN_VALUE, z1 = Integer.MIN_VALUE;
+            for (int[] c : coords) {
+                x0 = Math.min(x0, c[0]);
+                z0 = Math.min(z0, c[1]);
+                x1 = Math.max(x1, c[0]);
+                z1 = Math.max(z1, c[1]);
+            }
+            if (coords.isEmpty()) {
+                x0 = z0 = 0;
+                x1 = z1 = -1;
+            }
+            minX = x0;
+            minZ = z0;
+            w = x1 - x0 + 1;
+            h = z1 - z0 + 1;
+            cells = new long[Math.max(0, w) * Math.max(0, h)][];
+            for (int i = 0; i < coords.size(); i++) {
+                int[] c = coords.get(i);
+                cells[(c[0] - minX) * h + (c[1] - minZ)] = bits.get(i);
+            }
+        }
+
+        /** チャンク (cx, cz) が在るか。⚠ 負の座標も算術シフトと下位 5 ビットで region と中の位置に分かれる。 */
+        boolean has(int cx, int cz) {
+            int ix = (cx >> 5) - minX;
+            int iz = (cz >> 5) - minZ;
+            if (ix < 0 || iz < 0 || ix >= w || iz >= h) {
+                return false;
+            }
+            long[] b = cells[ix * h + iz];
+            if (b == null) {
+                return false;
+            }
+            int j = (cx & 31) + ((cz & 31) << 5);
+            return (b[j >> 6] & (1L << (j & 63))) != 0;
+        }
+    }
+
+    private static boolean ringComplete(Grid g, int rr) {
         for (int x = -rr; x <= rr; x++) {
-            if (!present.contains(key(x, -rr)) || !present.contains(key(x, rr))) {
+            if (!g.has(x, -rr) || !g.has(x, rr)) {
                 return false;
             }
         }
         for (int z = -rr + 1; z <= rr - 1; z++) {
-            if (!present.contains(key(-rr, z)) || !present.contains(key(rr, z))) {
+            if (!g.has(-rr, z) || !g.has(rr, z)) {
                 return false;
             }
         }
         return true;
-    }
-
-    private static long key(int x, int z) {
-        return ((long) x << 32) ^ (z & 0xFFFFFFFFL);
     }
 
     private GeneratedExtent() {
